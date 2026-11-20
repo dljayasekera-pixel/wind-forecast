@@ -13,6 +13,12 @@ t0 was produced at least 24 hours before the valid time. Horizons under 24 h
 therefore lean on SCADA lags. A run-resolved source (NOAA GFS/HRRR GRIB on
 S3, ECMWF open data, a commercial vendor) removes that limit and plugs in
 through the same NWPConnector interface.
+
+The connector is not wind-specific: pass ``variables`` (Open-Meteo name to
+column name) to fetch any hourly variable set, for example temperature and dew
+point for load forecasting. With the default wind variables the output is the
+canonical NWP frame; with custom variables it has the same time columns
+(provider, run_time, valid_time, available_time) plus the requested columns.
 """
 from __future__ import annotations
 
@@ -38,14 +44,30 @@ DAYS = range(1, 8)
 log = get_logger(__name__)
 
 
-def parse_response(payload: dict, provider: str, model: str | None = None) -> pd.DataFrame:
-    """Open-Meteo JSON to the canonical NWP frame."""
+TIME_COLUMNS = ["provider", "run_time", "valid_time", "available_time"]
+
+
+def validate_forecast(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Time checks shared by every forecast frame, whatever its variables."""
+    out = df[TIME_COLUMNS + columns].copy()
+    for col in ("run_time", "valid_time", "available_time"):
+        out[col] = pd.to_datetime(out[col], utc=True).dt.tz_localize(None).astype("datetime64[ns]")
+    if (out["available_time"] < out["run_time"]).any():
+        raise ValueError("available_time earlier than run_time")
+    out = out.drop_duplicates(["provider", "run_time", "valid_time"], keep="last")
+    return out.sort_values(["provider", "run_time", "valid_time"]).reset_index(drop=True)
+
+
+def parse_response(payload: dict, provider: str, model: str | None = None,
+                   variables: dict[str, str] | None = None) -> pd.DataFrame:
+    """Open-Meteo JSON to a forecast frame (the canonical NWP frame for the default variables)."""
+    variables = variables or VARIABLES
     hourly = payload["hourly"]
     valid = pd.to_datetime(hourly["time"])
     frames = []
     for day in DAYS:
         data = {}
-        for om_name, canon in VARIABLES.items():
+        for om_name, canon in variables.items():
             key = f"{om_name}_previous_day{day}"
             # With several models in one request the API suffixes keys with the model id.
             values = hourly.get(key, hourly.get(f"{key}_{model}" if model else key))
@@ -58,24 +80,34 @@ def parse_response(payload: dict, provider: str, model: str | None = None) -> pd
         frames.append(frame)
     out = pd.concat(frames, ignore_index=True)
     out["provider"] = provider
-    out = out.dropna(subset=["ws_100m", "ws_10m"], how="all")
-    return validate_nwp(out)
+    if variables is VARIABLES:
+        out = out.dropna(subset=["ws_100m", "ws_10m"], how="all")
+        return validate_nwp(out)
+    out = out.dropna(subset=list(variables.values()), how="all")
+    return validate_forecast(out, list(variables.values()))
 
 
 class OpenMeteoPreviousRuns(NWPConnector):
-    """One Open-Meteo model exposed as one provider."""
+    """One Open-Meteo model exposed as one provider.
+
+    ``cache_tag`` distinguishes cache files when one provider is fetched for
+    several locations (for example one point per load zone).
+    """
 
     def __init__(self, provider: str, model: str, latitude: float, longitude: float,
                  cache_dir: str | Path | None = None, session=None,
-                 max_retries: int = 4, pause_s: float = 1.0):
+                 max_retries: int = 4, pause_s: float = 1.0,
+                 variables: dict[str, str] | None = None, cache_tag: str | None = None):
         self.provider, self.model = provider, model
+        self.variables = variables or VARIABLES
+        self.cache_tag = cache_tag
         self.latitude, self.longitude = latitude, longitude
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.session = session or requests.Session()
         self.max_retries, self.pause_s = max_retries, pause_s
 
     def _params(self, start: pd.Timestamp, end: pd.Timestamp) -> dict:
-        hourly = [f"{v}_previous_day{d}" for v in VARIABLES for d in DAYS]
+        hourly = [f"{v}_previous_day{d}" for v in self.variables for d in DAYS]
         return {"latitude": self.latitude, "longitude": self.longitude,
                 "hourly": ",".join(hourly), "models": self.model,
                 "start_date": start.strftime("%Y-%m-%d"), "end_date": end.strftime("%Y-%m-%d"),
@@ -85,7 +117,8 @@ class OpenMeteoPreviousRuns(NWPConnector):
         cache = None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            cache = self.cache_dir / f"{self.provider}_{start:%Y%m%d}_{end:%Y%m%d}.json"
+            tag = f"{self.cache_tag}_" if self.cache_tag else ""
+            cache = self.cache_dir / f"{self.provider}_{tag}{start:%Y%m%d}_{end:%Y%m%d}.json"
             if cache.exists():
                 return json.loads(cache.read_text())
         last_error: Exception | None = None
@@ -117,10 +150,12 @@ class OpenMeteoPreviousRuns(NWPConnector):
             hi = min(month_start + pd.offsets.MonthEnd(1), t1 - pd.Timedelta("1s")).normalize()
             if lo > hi:
                 continue
-            frames.append(parse_response(self._get(lo, hi), self.provider, self.model))
+            frames.append(parse_response(self._get(lo, hi), self.provider, self.model, self.variables))
         out = pd.concat(frames, ignore_index=True)
         out = out[(out["valid_time"] >= t0) & (out["valid_time"] < t1)]
-        return validate_nwp(out)
+        if self.variables is VARIABLES:
+            return validate_nwp(out)
+        return validate_forecast(out, list(self.variables.values()))
 
 
 def fetch_all(cfg: dict, cache_dir: str | Path | None = None, session=None) -> pd.DataFrame:

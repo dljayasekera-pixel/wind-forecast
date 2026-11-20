@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "windcast"
-version = "0.1.0"
+version = "0.2.0"
 description = "Utility-scale wind power forecasting from SCADA and multi-provider NWP"
 requires-python = ">=3.11"
 dependencies = [

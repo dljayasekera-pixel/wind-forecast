@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -201,3 +202,46 @@ def test_lambda_ingest_writes_partitioned_objects(monkeypatch):
     assert result["written"] == len(s3.keys) > 0
     assert all(k.startswith(("nwp/provider=gfs/date=", "nwp/provider=ecmwf/date=")) for k in s3.keys)
     assert np.unique(s3.keys).size == len(s3.keys)
+
+
+def test_openmeteo_custom_variables_and_cache_tag(tmp_path):
+    """The connector fetches any variable set, and cache files are kept apart per location."""
+    variables = {"temperature_2m": "temp_c", "dew_point_2m": "dew_c"}
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params=None, timeout=None):
+            self.calls.append(params)
+            times = pd.date_range(params["start_date"], periods=48, freq="h")
+            hourly = {"time": [x.strftime("%Y-%m-%dT%H:%M") for x in times]}
+            base = 20.0 if params["longitude"] > -100 else 10.0
+            for var in variables:
+                for day in openmeteo.DAYS:
+                    hourly[f"{var}_previous_day{day}"] = [base + day] * 48
+            return FakeResponse({"hourly": hourly})
+
+    session = Session()
+    houston = openmeteo.OpenMeteoPreviousRuns("gfs", "gfs_seamless", 29.76, -95.37, tmp_path, session,
+                                              variables=variables, cache_tag="COAS")
+    midland = openmeteo.OpenMeteoPreviousRuns("gfs", "gfs_seamless", 31.99, -102.08, tmp_path, session,
+                                              variables=variables, cache_tag="FWES")
+    a, b = houston.fetch("2024-03-01", "2024-03-03"), midland.fetch("2024-03-01", "2024-03-03")
+    assert list(a.columns) == ["provider", "run_time", "valid_time", "available_time", "temp_c", "dew_c"]
+    assert "temperature_2m_previous_day1" in session.calls[0]["hourly"]
+    assert "wind_speed_100m" not in session.calls[0]["hourly"]
+    lead = (a["valid_time"] - a["run_time"]) / pd.Timedelta("1h")
+    assert (a.loc[lead == 24, "temp_c"] == 21.0).all() and (a["available_time"] == a["run_time"]).all()
+    assert len(session.calls) == 2 and len(list(tmp_path.glob("gfs_COAS_*.json"))) == 1
+    houston.fetch("2024-03-01", "2024-03-03")
+    assert len(session.calls) == 2  # cached per location
+    assert not a.equals(b)
+
+
+def test_openmeteo_default_cache_names_unchanged(tmp_path):
+    """Existing wind caches must keep working after the generalisation."""
+    conn = openmeteo.OpenMeteoPreviousRuns("gfs", "gfs_seamless", 52.4, -0.94, tmp_path)
+    (tmp_path / "gfs_20240301_20240302.json").write_text(json.dumps(_om_payload("2024-03-01", 48)))
+    out = conn.fetch("2024-03-01", "2024-03-03")
+    assert list(out.columns) == NWP_COLUMNS and len(out) > 0
