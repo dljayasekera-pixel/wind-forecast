@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install
+        run: |
+          pip install -r requirements.lock
+          pip install -e . --no-deps
+      - name: Lint
+        run: ruff check src tests app infra scripts
+      - name: Unit tests
+        run: pytest -m "not slow"
+      - name: End-to-end tests (train on synthetic data)
+        run: pytest -m slow
+
+  image:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t windcast:${{ github.sha }} .
+      # Pushing to ECR needs an AWS role; add aws-actions/configure-aws-credentials
+      # and amazon-ecr-login here once the account exists.

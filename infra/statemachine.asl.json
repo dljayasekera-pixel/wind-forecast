@@ -1,0 +1,90 @@
+{
+  "Comment": "windcast hourly forecast cycle: ingest -> prepare -> predict -> monitor, with a retraining branch. Substitutions (${...}) are filled in by Terraform.",
+  "StartAt": "IngestNWP",
+  "States": {
+    "IngestNWP": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "${ingest_lambda_arn}", "Payload.$": "$" },
+      "ResultSelector": { "ingest.$": "$.Payload" },
+      "ResultPath": "$.steps",
+      "Retry": [
+        { "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "States.Timeout"],
+          "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0 }
+      ],
+      "Catch": [ { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Prepare" } ],
+      "Next": "Prepare"
+    },
+    "Prepare": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "Cluster": "${ecs_cluster_arn}",
+        "TaskDefinition": "${task_definition_arn}",
+        "LaunchType": "FARGATE",
+        "NetworkConfiguration": { "AwsvpcConfiguration": { "Subnets": ${subnets_json}, "AssignPublicIp": "DISABLED" } },
+        "Overrides": { "ContainerOverrides": [ { "Name": "windcast", "Command": ["prepare", "--config", "${config_path}"] } ] }
+      },
+      "Retry": [ { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 60, "MaxAttempts": 2, "BackoffRate": 2.0 } ],
+      "ResultPath": null,
+      "Next": "Predict"
+    },
+    "Predict": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "Cluster": "${ecs_cluster_arn}",
+        "TaskDefinition": "${task_definition_arn}",
+        "LaunchType": "FARGATE",
+        "NetworkConfiguration": { "AwsvpcConfiguration": { "Subnets": ${subnets_json}, "AssignPublicIp": "DISABLED" } },
+        "Overrides": { "ContainerOverrides": [ { "Name": "windcast", "Command": ["predict", "--config", "${config_path}"] } ] }
+      },
+      "Retry": [ { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 60, "MaxAttempts": 2, "BackoffRate": 2.0 } ],
+      "Catch": [ { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" } ],
+      "ResultPath": null,
+      "Next": "Monitor"
+    },
+    "Monitor": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": { "FunctionName": "${monitor_lambda_arn}", "Payload.$": "$" },
+      "ResultSelector": { "retrain.$": "$.Payload.retrain_recommended" },
+      "ResultPath": "$.monitor",
+      "Next": "RetrainNeeded"
+    },
+    "RetrainNeeded": {
+      "Type": "Choice",
+      "Choices": [ { "Variable": "$.monitor.retrain", "BooleanEquals": true, "Next": "Retrain" } ],
+      "Default": "Done"
+    },
+    "Retrain": {
+      "Comment": "Backtest + train on SageMaker, registered but NOT promoted. A person (or a later gate comparing shadow forecasts) moves the 'latest' pointer.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sagemaker:createTrainingJob.sync",
+      "Parameters": {
+        "TrainingJobName.$": "States.Format('windcast-{}', $$.Execution.Name)",
+        "RoleArn": "${sagemaker_role_arn}",
+        "AlgorithmSpecification": {
+          "TrainingImage": "${image_uri}",
+          "TrainingInputMode": "File",
+          "ContainerEntrypoint": ["windcast"],
+          "ContainerArguments": ["train", "--config", "${config_path}", "--no-promote"]
+        },
+        "ResourceConfig": { "InstanceType": "ml.m5.xlarge", "InstanceCount": 1, "VolumeSizeInGB": 30 },
+        "OutputDataConfig": { "S3OutputPath": "s3://${artifact_bucket}/sagemaker/" },
+        "StoppingCondition": { "MaxRuntimeInSeconds": 7200 }
+      },
+      "Catch": [ { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" } ],
+      "ResultPath": null,
+      "Next": "Done"
+    },
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": { "TopicArn": "${alert_topic_arn}", "Subject": "windcast forecast cycle failed", "Message.$": "States.JsonToString($.error)" },
+      "Next": "Failed"
+    },
+    "Failed": { "Type": "Fail" },
+    "Done": { "Type": "Succeed" }
+  }
+}
