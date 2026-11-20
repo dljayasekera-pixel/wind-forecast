@@ -1,0 +1,36 @@
+# Real public data: Kelmarsh wind farm SCADA (Zenodo, CC-BY-4.0) and archived
+# forecasts from three NWP models through the Open-Meteo Previous Runs API.
+# 2024 is the year both sources cover: Kelmarsh ends 2024-12-31 and the
+# Open-Meteo forecast archive starts in January 2024 for most models.
+site:
+  name: kelmarsh
+  latitude: 52.4016
+  longitude: -0.9431
+  elevation_m: 145.0
+  hub_height_m: 78.5        # four turbines at 78.5 m, two at 68.5 m
+  rated_kw: 2050.0
+  n_turbines: 6
+  cut_in_ms: 3.0
+  cut_out_ms: 24.0
+
+data:
+  source: kelmarsh
+  start: "2024-01-01"
+  end: "2025-01-01"
+  root: data/kelmarsh
+
+providers:
+  gfs:   {openmeteo_model: gfs_seamless}
+  ecmwf: {openmeteo_model: ecmwf_ifs025}
+  icon:  {openmeteo_model: icon_seamless}
+
+weather:
+  # Open-Meteo pseudo-runs are at most 24 h old by construction.
+  max_age_h: 30.0
+
+monitoring:
+  # Open-Meteo forecasts are at least 24 h old by construction, so 18 h would always fire.
+  max_provider_lag_h: 30.0
+
+paths:
+  artifacts: artifacts/kelmarsh

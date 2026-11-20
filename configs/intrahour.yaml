@@ -1,0 +1,29 @@
+# Intra-hour product: 10-minute resolution, 10 to 60 minutes ahead, re-issued hourly.
+# Same code path as the hourly product; only resolution, leads and lags change.
+data:
+  source: synthetic
+  start: "2024-01-01"
+  end: "2024-09-01"
+  root: data/intrahour
+  seed: 42
+
+providers:
+  gfs:   {cycle_h: 6}
+  ecmwf: {cycle_h: 12}
+  icon:  {cycle_h: 6}
+
+forecast:
+  resolution: 10min
+  issue_freq: 1h
+  leads: [10min, 20min, 30min, 40min, 50min, 60min]
+  lag_steps: [1, 2, 3, 6]
+  roll_steps: [3, 6, 18]
+  stale_limit_steps: 6
+
+backtest:
+  initial_train_days: 120
+  test_days: 30
+  arima: {enabled: true, order: [2, 0, 1], max_lead_h: 1, max_origins_per_fold: 120, history_steps: 400}
+
+paths:
+  artifacts: artifacts/intrahour

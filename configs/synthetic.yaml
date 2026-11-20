@@ -1,0 +1,16 @@
+# Offline run on generated data. Used by CI and for a first look; no network needed.
+# Anything not set here comes from windcast.config.DEFAULTS.
+data:
+  source: synthetic
+  start: "2024-01-01"
+  end: "2025-01-01"
+  root: data/synthetic
+  seed: 42
+
+providers:
+  gfs:   {cycle_h: 6}
+  ecmwf: {cycle_h: 12}
+  icon:  {cycle_h: 6}
+
+paths:
+  artifacts: artifacts/synthetic
