@@ -1,5 +1,7 @@
 # windcast: utility-scale wind power forecasting
 
+[![ci](https://github.com/dljayasekera-pixel/wind-forecast/actions/workflows/ci.yml/badge.svg)](https://github.com/dljayasekera-pixel/wind-forecast/actions/workflows/ci.yml)
+
 Probabilistic power forecasts for a wind farm from 10 minutes to 7 days ahead, built from turbine SCADA
 and several NWP providers, with the provider benchmarking, backtesting, root-cause analysis and
 production plumbing that an operational forecast needs.
